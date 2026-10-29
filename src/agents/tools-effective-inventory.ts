@@ -45,6 +45,7 @@ import type {
   EffectiveToolInventoryResult,
   ResolveEffectiveToolInventoryParams,
 } from "./tools-effective-inventory.types.js";
+import { describeGitHubPublishToolPreview } from "./tools/github-publish-tool.js";
 
 function listIncludesTool(list: string[] | undefined, toolName: string): boolean {
   if (!Array.isArray(list)) {
@@ -411,6 +412,13 @@ export async function resolveEffectiveToolInventory(
   const effectivePolicy = capabilityProfile.policy;
   const profile = effectivePolicy.providerProfile ?? effectivePolicy.profile ?? "full";
   const entries = projectedInventory.entries;
+  for (const entry of entries) {
+    if (entry.source === "core" && entry.id === "github_publish") {
+      entry.rawDescription = describeGitHubPublishToolPreview(
+        params.githubPublicationAvailable !== false,
+      );
+    }
+  }
   const notices = [
     ...projectedInventory.notices,
     ...(buildToolInventoryNotices({ cfg: params.cfg, profile, entries, effectivePolicy }) ?? []),

@@ -1,0 +1,2 @@
+82
+# Real tools.effective regression for managed GitHub listing, conditional actions and unavailable/cache controls.

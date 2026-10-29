@@ -99,6 +99,14 @@ ${prepareAvailable ? `- prepare_pr: when the user asks to continue their own exi
   return `${readiness}${inspection}${publication} For an explicit landing request from a person with full operator write access, use inspect, then ready and merge after review and required checks. For an explicit closure request, use close to close the PR without merging or deleting saved work. ready, merge and close require the inspected expectedHeadCommit and any publication requestId; merge also requires mergeMethod. For delegated work, explicitly select its publishingSessionKey from this conversation's children; never guess a PR. Actions return the observed GitHub state and never enable auto-merge. Inspect after an uncertain response before retrying. Inspect, merge, close and child selection require full operator write access. These actions also support a bound original PR: use its observed expectedHeadCommit without requestId when no publication receipt is returned. Actions do not change session sandboxing.`;
 }
 
+/** Preview action families without preparing a sandbox or claiming its runtime capabilities. */
+export function describeGitHubPublishToolPreview(publicationAvailable: boolean): string {
+  const conditions = publicationAvailable
+    ? "This preview includes conditional workspace actions. Their availability depends on the prepared runtime; previewing them grants no execution authority.\n\n"
+    : "";
+  return conditions + describeGitHubPublishTool(publicationAvailable, true, true, true);
+}
+
 // Tool construction runs every turn; one schema object per availability combination keeps
 // identity-keyed schema normalization and prepared-descriptor caches warm.
 const githubPublishParameterSchemas = new Map<string, AnyAgentTool["parameters"]>();

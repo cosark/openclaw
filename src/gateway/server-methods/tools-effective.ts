@@ -3,6 +3,7 @@ import {
   ErrorCodes,
   validateToolsEffectiveParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { readAcpSessionMetaForEntryAsync } from "../../acp/runtime/session-meta-readonly.js";
 import {
   buildBundleMcpToolsFromCatalog,
   peekSessionMcpRuntime,
@@ -18,6 +19,8 @@ import { prepareConversationCapabilityProfile } from "../../agents/conversation-
 import { resolveConversationToolPolicies } from "../../agents/conversation-tool-policy-pipeline.js";
 import { applyFinalEffectiveToolPolicy } from "../../agents/embedded-agent-runner/effective-tool-policy.js";
 import { getRegisteredAgentHarness } from "../../agents/harness/registry.js";
+import { agentHarnessExposesOpenClawTools } from "../../agents/harness/tool-surface.js";
+import { resolveEffectiveAgentRuntime } from "../../agents/thinking-runtime.js";
 import { readToolAllowlistIntersection } from "../../agents/tool-policy-shared.js";
 import type { ToolPolicyLike } from "../../agents/tool-policy.js";
 import { buildEffectiveToolInventoryGroups } from "../../agents/tools-effective-inventory-groups.js";
@@ -106,6 +109,7 @@ function buildToolsEffectiveCacheKey(context: TrustedToolsEffectiveContext): str
     groupSpace: optionalCacheString(context.groupSpace),
     replyToMode: optionalCacheString(context.replyToMode),
     webSearchEnabled: context.toolOverrides?.webSearch !== false,
+    githubPublicationAvailable: context.githubPublicationAvailable,
     // Prepared session ceilings can change without a config or session-id change.
     policy: Object.values<ToolPolicyLike | undefined>(
       resolveConversationToolPolicies({ capabilityProfile: context.capabilityProfile }),
@@ -285,6 +289,7 @@ async function resolveBaseToolsEffectiveInventory(
         groupSpace: context.groupSpace,
         replyToMode: context.replyToMode,
         webSearchEnabled: context.toolOverrides?.webSearch,
+        githubPublicationAvailable: context.githubPublicationAvailable,
       }),
     );
   } finally {
@@ -459,6 +464,7 @@ async function resolveTrustedToolsEffectiveContext(
   params: {
     sessionKey: string;
     requestedAgentId?: string;
+    localEmbedded?: boolean;
     respond: RespondFn;
   },
   loaded: Pick<GatewaySessionEntryRead, "entry" | "canonicalKey" | "cfg">,
@@ -492,6 +498,26 @@ async function resolveTrustedToolsEffectiveContext(
   const delivery = deliveryContextFromSession(loaded.entry);
   const origin = sessionDeliveryOrigin(loaded.entry);
   const resolvedModel = resolveSessionModelRef(loaded.cfg, loaded.entry, sessionAgentId);
+  const agentRuntime = resolveEffectiveAgentRuntime({
+    cfg: loaded.cfg,
+    provider: resolvedModel.provider,
+    modelId: resolvedModel.model,
+    agentScope: { kind: "prepared", agentId: sessionAgentId },
+    sessionKey: canonicalKey,
+    sessionEntry: loaded.entry,
+  });
+  // Listing describes the brokered surface, never current publication authority.
+  const githubPublicationAvailable =
+    !params.localEmbedded &&
+    agentHarnessExposesOpenClawTools(agentRuntime) &&
+    !(await readAcpSessionMetaForEntryAsync({
+      cfg: loaded.cfg,
+      sessionKey: canonicalKey,
+      agentId: sessionAgentId,
+      entry: loaded.entry,
+    }))
+      ? true
+      : undefined;
   const workspaceDir =
     normalizeOptionalString(loaded.entry.spawnedWorkspaceDir) ??
     resolveAgentWorkspaceDir(loaded.cfg, sessionAgentId);
@@ -521,6 +547,7 @@ async function resolveTrustedToolsEffectiveContext(
     groupSpace: loaded.entry.space,
     spawnedBy: normalizeOptionalString(loaded.entry.spawnedBy),
     agentHarnessId: normalizeOptionalString(loaded.entry.agentHarnessId),
+    githubPublicationAvailable,
     toolOverrides: loaded.entry.toolOverrides,
     replyToMode: resolveReplyToMode(
       loaded.cfg,
@@ -575,6 +602,7 @@ export const toolsEffectiveHandlers: GatewayRequestHandlers = {
           {
             sessionKey: params.sessionKey,
             requestedAgentId: sessionOwner.agentId,
+            localEmbedded: context.localEmbedded,
             respond,
           },
           loaded,

@@ -77,6 +77,9 @@ const runtimeMocks = vi.hoisted(() => ({
   })),
   resolveAgentWorkspaceDir: vi.fn(() => "/tmp/workspace-main"),
   resolveEffectiveToolInventory: vi.fn(),
+  readAcpSessionMetaForEntryAsync: vi.fn<
+    typeof import("../../acp/runtime/session-meta-readonly.js").readAcpSessionMetaForEntryAsync
+  >(async () => undefined),
   resolveReplyToMode: vi.fn<
     typeof import("../../auto-reply/reply/reply-threading.js").resolveReplyToMode
   >(() => "first"),
@@ -100,6 +103,10 @@ const runtimeMocks = vi.hoisted(() => ({
   })),
 }));
 
+vi.mock("../../acp/runtime/session-meta-readonly.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../acp/runtime/session-meta-readonly.js")>()),
+  readAcpSessionMetaForEntryAsync: runtimeMocks.readAcpSessionMetaForEntryAsync,
+}));
 vi.mock("../../agents/agent-bundle-mcp-tools.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../agents/agent-bundle-mcp-tools.js")>()),
   buildBundleMcpToolsFromCatalog: runtimeMocks.buildBundleMcpToolsFromCatalog,
@@ -170,6 +177,7 @@ type RespondCall = [boolean, unknown?, { code: number; message: string }?];
 async function invokeTools(
   params: Record<string, unknown> = { sessionKey: "main:abc" },
   cfg: Record<string, unknown> = {},
+  localEmbedded = false,
 ) {
   const respond = vi.fn();
   await expectDefined(
@@ -178,7 +186,7 @@ async function invokeTools(
   )({
     params,
     respond: respond as never,
-    context: { getRuntimeConfig: () => cfg } as never,
+    context: { getRuntimeConfig: () => cfg, localEmbedded } as never,
     client: null,
     req: { type: "req", id: "req-1", method: "tools.effective" },
     isWebchatConnect: () => false,
@@ -417,6 +425,80 @@ describe("tools.effective handler", () => {
       const payload = payloadOf(respond);
       const toolIds = payload.groups?.flatMap((group) => group.tools?.map((tool) => tool.id) ?? []);
       expect(toolIds?.includes("web_search")).toBe(webSearch !== false);
+    }
+  });
+
+  it("previews managed GitHub tools through the real inventory without credential discovery", async () => {
+    const { resolveEffectiveToolInventory } = await vi.importActual<InventoryModule>(
+      "../../agents/tools-effective-inventory.js",
+    );
+    runtimeMocks.resolveEffectiveToolInventory.mockImplementation(resolveEffectiveToolInventory);
+    // Keep the session and cache clock fixed while its selected runtime changes.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    onTestFinished(() => clock.mockRestore());
+    for (const scenario of [
+      { runtime: "openclaw", historical: "external", expected: true },
+      { runtime: "external", historical: "openclaw", expected: false },
+      { runtime: "codex", expected: true },
+      { runtime: "copilot", expected: true },
+      { runtime: "openclaw", localEmbedded: true, expected: false },
+      { runtime: "openclaw", acp: true, expected: false },
+      { runtime: "openclaw", expected: true },
+      { runtime: "openclaw", denied: true, expected: false },
+    ]) {
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-4.1": { agentRuntime: { id: scenario.runtime } } },
+          },
+        },
+        tools: {
+          deny: [
+            "gateway",
+            "nodes",
+            ...(scenario.denied ? ["github_publish", "github_identity_status"] : []),
+          ],
+        },
+      };
+      mockSession({ agentHarnessId: scenario.historical }, { cfg });
+      runtimeMocks.readAcpSessionMetaForEntryAsync.mockResolvedValue(
+        scenario.acp
+          ? {
+              backend: "acpx",
+              agent: "main",
+              runtimeSessionName: "main:abc",
+              mode: "persistent",
+              state: "idle",
+              lastActivityAt: 1,
+            }
+          : undefined,
+      );
+      const respond = await invokeTools({ sessionKey: "main:abc" }, cfg, scenario.localEmbedded);
+      expectResponsesOk(respond);
+      const tools = payloadOf(respond).groups.flatMap((group) => group.tools);
+      expect(tools.some((tool) => tool.id === "gateway" || tool.id === "nodes")).toBe(false);
+      const githubTools = tools.filter((tool) => tool.id.startsWith("github_"));
+      expect(githubTools.map((tool) => tool.id)).toEqual(
+        scenario.expected ? ["github_identity_status", "github_publish"] : [],
+      );
+      if (scenario.expected) {
+        const description = expectDefined(
+          githubTools.find((tool) => tool.id === "github_publish"),
+          "GitHub publication preview",
+        ).rawDescription;
+        for (const action of [
+          "readiness",
+          "inspect_pr",
+          "prepare_pr",
+          "refresh_base",
+          "upload_evidence",
+          "merge",
+        ]) {
+          expect(description).toContain(action);
+        }
+        expect(description).toContain("conditional workspace actions");
+        expect(description).toContain("previewing them grants no execution authority");
+      }
     }
   });
 
