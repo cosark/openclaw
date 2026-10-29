@@ -32,6 +32,8 @@ export type ResolveEffectiveToolInventoryParams = {
   accountId?: string | null;
   modelProvider?: string;
   modelId?: string;
+  /** Selected next-turn runtime, distinct from the last run's harness. */
+  agentRuntime?: string;
   modelApi?: string | null;
   runtimeModel?: ProviderRuntimeModel;
   currentChannelId?: string;

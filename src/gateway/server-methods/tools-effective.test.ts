@@ -2,6 +2,7 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
+import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import type { McpToolCatalog } from "../../agents/agent-bundle-mcp-types.js";
 import * as conversationToolPolicyPipeline from "../../agents/conversation-tool-policy-pipeline.js";
 import * as toolSchemaRuntime from "../../agents/embedded-agent-runner/tool-schema-runtime.js";
@@ -16,6 +17,7 @@ import {
   restoreActivePluginRegistrySnapshot,
   setActivePluginRegistry,
 } from "../../plugins/runtime.js";
+import { createPluginRecord } from "../../plugins/status.test-helpers.js";
 import { setPluginToolMeta } from "../../plugins/tool-metadata.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.paths.js";
 import { fixedStoreOwnershipConfig } from "./sessions-fixed-store.test-support.js";
@@ -500,6 +502,83 @@ describe("tools.effective handler", () => {
         expect(description).toContain("previewing them grants no execution authority");
       }
     }
+  });
+
+  it("keeps cached GitHub previews separate when the selected runtime changes", async () => {
+    const { resolveEffectiveToolInventory } = await vi.importActual<InventoryModule>(
+      "../../agents/tools-effective-inventory.js",
+    );
+    runtimeMocks.resolveEffectiveToolInventory.mockImplementation(resolveEffectiveToolInventory);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    onTestFinished(() => clock.mockRestore());
+    const cfg: OpenClawConfig = {
+      plugins: {
+        entries: { codex: { config: { codexDynamicToolsExclude: [" GitHub_Publish "] } } },
+      },
+    };
+    for (const runtime of ["openclaw", "codex", "openclaw"]) {
+      mockSession({ agentRuntimeOverride: runtime }, { cfg });
+      const respond = await invokeTools({ sessionKey: "main:abc" }, cfg);
+      expectResponsesOk(respond);
+      const githubIds = payloadOf(respond)
+        .groups.flatMap((group) => group.tools)
+        .filter((tool) => tool.id === "github_identity_status" || tool.id === "github_publish")
+        .map((tool) => tool.id);
+      expect(githubIds).toEqual(
+        runtime === "codex"
+          ? ["github_identity_status"]
+          : ["github_identity_status", "github_publish"],
+      );
+    }
+    expect(runtimeMocks.resolveEffectiveToolInventory).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes partial GitHub previews when the Codex owner gains preview metadata", async () => {
+    const { resolveEffectiveToolInventory } = await vi.importActual<InventoryModule>(
+      "../../agents/tools-effective-inventory.js",
+    );
+    runtimeMocks.resolveEffectiveToolInventory.mockImplementation(resolveEffectiveToolInventory);
+    const temp = createTempDirTracker();
+    onTestFinished(temp.cleanup);
+    const registrySnapshot = captureActivePluginRegistrySnapshot();
+    onTestFinished(() => restoreActivePluginRegistrySnapshot(registrySnapshot));
+    const registry = createEmptyPluginRegistry();
+    const rootDir = temp.make("codex-without-preview-");
+    registry.plugins.push(
+      createPluginRecord({
+        id: "codex",
+        origin: "global",
+        version: "2026.9.7",
+        rootDir,
+        source: `${rootDir}/index.js`,
+      }),
+    );
+    setActivePluginRegistry(registry);
+    runtimeMocks.getActivePluginRegistryVersion.mockReturnValue(1);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    onTestFinished(() => clock.mockRestore());
+    const cfg: OpenClawConfig = {};
+    mockSession({ agentRuntimeOverride: "codex" }, { cfg });
+    const partial = await invokeTools({ sessionKey: "main:abc" }, cfg);
+    expectResponsesOk(partial);
+    const tools = payloadOf(partial).groups.flatMap((group) => group.tools);
+    expect(tools.some((tool) => tool.id === "read")).toBe(true);
+    expect(tools.some((tool) => tool.id === "github_publish")).toBe(false);
+    expect(tools.some((tool) => tool.id === "github_identity_status")).toBe(false);
+    expect(payloadOf(partial).notices).toContainEqual(
+      expect.objectContaining({ id: "codex-github-preview-unavailable" }),
+    );
+
+    restoreActivePluginRegistrySnapshot(registrySnapshot);
+    runtimeMocks.getActivePluginRegistryVersion.mockReturnValue(2);
+    const upgraded = await invokeTools({ sessionKey: "main:abc" }, cfg);
+    expectResponsesOk(upgraded);
+    expect(
+      payloadOf(upgraded).groups.flatMap((group) => group.tools.map((tool) => tool.id)),
+    ).toEqual(expect.arrayContaining(["github_identity_status", "github_publish"]));
+    expect(payloadOf(upgraded).notices ?? []).not.toContainEqual(
+      expect.objectContaining({ id: "codex-github-preview-unavailable" }),
+    );
   });
 
   it.each(["prepare_pr", "inspect_pr"])(

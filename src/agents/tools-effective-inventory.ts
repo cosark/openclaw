@@ -13,6 +13,10 @@ import {
   findConfiguredProviderModel,
   resolveMergedModelProviderConfig,
 } from "../config/model-provider-config.js";
+import {
+  hasBundledPluginPublicSurface,
+  loadBundledPluginPublicSurfaceModuleSync,
+} from "../plugin-sdk/facade-runtime.js";
 import { withPluginMetadataSnapshotScope } from "../plugins/current-plugin-metadata-snapshot.js";
 import { getGatewayPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-state.js";
 import { resolvePluginControlPlaneFingerprint } from "../plugins/plugin-control-plane-context.js";
@@ -37,7 +41,10 @@ import { acquireReadOnlyPreparedModelRuntime } from "./prepared-model-runtime.js
 import { retainRuntimePluginWork } from "./runtime-plugin-work.js";
 import { createToolAccessDiagnostics } from "./tool-access-diagnostics.js";
 import { normalizeToolPolicyName } from "./tool-policy.js";
-import { buildRuntimeCompatibleToolInventory } from "./tools-effective-inventory-build.js";
+import {
+  buildReadableToolsByName,
+  buildRuntimeCompatibleToolInventory,
+} from "./tools-effective-inventory-build.js";
 import { buildEffectiveToolInventoryGroups } from "./tools-effective-inventory-groups.js";
 import type {
   EffectiveToolInventoryNotice,
@@ -373,8 +380,9 @@ export async function resolveEffectiveToolInventory(
       agentAccountId: params.accountId,
     }));
   const diagnostics = createToolAccessDiagnostics({ profiles: capabilityProfile.policy.profiles });
-  const effectiveTools = await withGatewayToolInventoryScope(params.cfg, workspaceDir, () =>
-    createOpenClawCodingToolsInternalAsync(
+  let githubPreviewUnavailable = false;
+  const effectiveTools = await withGatewayToolInventoryScope(params.cfg, workspaceDir, async () => {
+    const tools = await createOpenClawCodingToolsInternalAsync(
       {
         ...params,
         conversationCapabilityProfile: capabilityProfile,
@@ -398,8 +406,34 @@ export async function resolveEffectiveToolInventory(
       },
       undefined,
       diagnostics.onFilter,
-    ),
-  );
+    );
+    if (params.agentRuntime !== "codex" || !params.githubPublicationAvailable) {
+      return tools;
+    }
+    // Only project these brokered additions here; other tools retain their native-surface semantics.
+    const toolsByName = buildReadableToolsByName(tools);
+    const githubToolNames = ["github_identity_status", "github_publish"].filter((name) =>
+      toolsByName.has(name),
+    );
+    if (githubToolNames.length === 0) {
+      return tools;
+    }
+    const surface = { dirName: "codex", artifactBasename: "tool-profile-api.js" };
+    githubPreviewUnavailable = !hasBundledPluginPublicSurface(surface);
+    const allowed = new Set(
+      githubPreviewUnavailable
+        ? []
+        : loadBundledPluginPublicSurfaceModuleSync<{
+            filterDynamicToolNames: (names: readonly string[], config: OpenClawConfig) => string[];
+          }>(surface).filterDynamicToolNames(githubToolNames, params.cfg),
+    );
+    const excluded = new Set(
+      githubToolNames
+        .filter((name) => !allowed.has(name))
+        .flatMap((name) => toolsByName.get(name) ?? []),
+    );
+    return tools.filter((tool) => !excluded.has(tool));
+  });
   const projectedInventory = buildRuntimeCompatibleToolInventory({
     tools: effectiveTools,
     cfg: params.cfg,
@@ -412,10 +446,18 @@ export async function resolveEffectiveToolInventory(
   const effectivePolicy = capabilityProfile.policy;
   const profile = effectivePolicy.providerProfile ?? effectivePolicy.profile ?? "full";
   const entries = projectedInventory.entries;
-  const notices = [
+  const notices: EffectiveToolInventoryNotice[] = [
     ...projectedInventory.notices,
     ...(buildToolInventoryNotices({ cfg: params.cfg, profile, entries, effectivePolicy }) ?? []),
   ];
+  if (githubPreviewUnavailable) {
+    notices.push({
+      id: "codex-github-preview-unavailable",
+      severity: "info",
+      message:
+        "Update the Codex plugin to preview GitHub tools. This does not change execution access.",
+    });
+  }
   const groups = buildEffectiveToolInventoryGroups(entries);
 
   return {

@@ -100,6 +100,7 @@ function buildToolsEffectiveCacheKey(context: TrustedToolsEffectiveContext): str
     agentId: context.agentId,
     modelProvider: optionalCacheString(context.modelProvider),
     modelId: optionalCacheString(context.modelId),
+    agentRuntime: context.agentRuntime,
     messageProvider: optionalCacheString(context.messageProvider),
     accountId: optionalCacheString(context.accountId),
     currentChannelId: optionalCacheString(context.currentChannelId),
@@ -279,6 +280,7 @@ async function resolveBaseToolsEffectiveInventory(
         messageProvider: context.messageProvider,
         modelProvider: context.modelProvider,
         modelId: context.modelId,
+        agentRuntime: context.agentRuntime,
         modelApi: runtimeModelContext.modelApi,
         runtimeModel: runtimeModelContext.runtimeModel,
         currentChannelId: context.currentChannelId,
@@ -534,6 +536,7 @@ async function resolveTrustedToolsEffectiveContext(
     modelProvider: resolvedModel.provider,
     modelId: resolvedModel.model,
     messageProvider: delivery?.channel ?? origin?.provider,
+    agentRuntime,
     accountId: delivery?.accountId ?? origin?.accountId,
     currentChannelId: delivery?.to,
     currentThreadTs:

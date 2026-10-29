@@ -48,6 +48,10 @@ Methods an operator client calls on behalf of a person: helper reads, exec appro
     unsupported runtimes do not acquire them. GitHub action descriptions mark
     sandbox-dependent actions as conditional: the preview does not prepare a
     workspace, inspect credentials, or grant publication or merge authority.
+    Codex-specific exclusions apply when Codex is the selected runtime; switching
+    runtimes selects the matching GitHub preview instead of reusing the other one.
+    Older Codex plugins without preview metadata omit these two rows with an
+    update notice; other tools remain visible and execution access is unchanged.
   - A saved `toolOverrides.webSearch=false` excludes core `web_search`. Changing
     this override selects the matching preview instead of reusing the other
     state's cached inventory.
