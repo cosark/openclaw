@@ -46,6 +46,7 @@ import {
   buildRuntimeCompatibleToolInventory,
 } from "./tools-effective-inventory-build.js";
 import { buildEffectiveToolInventoryGroups } from "./tools-effective-inventory-groups.js";
+import { CODEX_GITHUB_PREVIEW_UNAVAILABLE_NOTICE } from "./tools-effective-inventory-shared.js";
 import type {
   EffectiveToolInventoryNotice,
   EffectiveToolInventoryEntry,
@@ -451,12 +452,7 @@ export async function resolveEffectiveToolInventory(
     ...(buildToolInventoryNotices({ cfg: params.cfg, profile, entries, effectivePolicy }) ?? []),
   ];
   if (githubPreviewUnavailable) {
-    notices.push({
-      id: "codex-github-preview-unavailable",
-      severity: "info",
-      message:
-        "Update the Codex plugin to preview GitHub tools. This does not change execution access.",
-    });
+    notices.push(CODEX_GITHUB_PREVIEW_UNAVAILABLE_NOTICE);
   }
   const groups = buildEffectiveToolInventoryGroups(entries);
 
