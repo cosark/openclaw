@@ -496,11 +496,42 @@ describe("tools.effective handler", () => {
         ]) {
           expect(description).toContain(action);
         }
-        expect(description).toContain("conditional workspace actions");
+        expect(description).toContain("prepared runtime");
         expect(description).toContain("previewing them grants no execution authority");
       }
     }
   });
+
+  it.each(["prepare_pr", "inspect_pr"])(
+    "limits the GitHub preview to permitted %s actions",
+    async (action) => {
+      const { resolveEffectiveToolInventory } = await vi.importActual<InventoryModule>(
+        "../../agents/tools-effective-inventory.js",
+      );
+      runtimeMocks.resolveEffectiveToolInventory.mockImplementation(resolveEffectiveToolInventory);
+      const cfg: OpenClawConfig = {
+        tools: {
+          gatewayPolicy: {
+            allow: ["github_publish"],
+            actions: { github_publish: [action, "not_an_action"] },
+          },
+        },
+      };
+      mockSession({}, { cfg });
+      const respond = await invokeTools({ sessionKey: "main:abc" }, cfg);
+      expectResponsesOk(respond);
+      const tool = payloadOf(respond)
+        .groups.flatMap((group) => group.tools)
+        .find((candidate) => candidate.id === "github_publish");
+      expect(tool).toBeDefined();
+      expect(tool?.rawDescription).toContain(action);
+      expect(tool?.rawDescription).not.toContain("merge");
+      expect(tool?.rawDescription).not.toContain("not_an_action");
+      expect(tool?.rawDescription).not.toContain(
+        action === "prepare_pr" ? "inspect_pr" : "prepare_pr",
+      );
+    },
+  );
 
   it("coalesces identical base inventory cache misses while inventory resolution is pending", async () => {
     const buildSteps = vi.spyOn(
