@@ -41,7 +41,10 @@ const workerProgram = fs.readFileSync(
 );
 
 function stubObjectUrls() {
-  // jsdom has no Worker. Execute the shipped program; browser proof covers its HTTP/CSP realm.
+  // jsdom has no Worker. Keep its URL API separate: reverting to app-created PDF URLs must fail.
+  // The real-browser proof covers HTTP policy inheritance and native PDF pixels.
+  const createObjectURL = vi.fn(() => `blob:${location.origin}/pdf-preview`);
+  const revokeObjectURL = vi.fn();
   class TestWorker extends EventTarget {
     stopped = false;
     receive?: (event: { data: unknown }) => void;
@@ -64,7 +67,12 @@ function stubObjectUrls() {
     };
     constructor() {
       super();
-      vm.runInNewContext(workerProgram, { self: this.realm, URL, Blob, ArrayBuffer });
+      vm.runInNewContext(workerProgram, {
+        self: this.realm,
+        URL: { createObjectURL, revokeObjectURL },
+        Blob,
+        ArrayBuffer,
+      });
     }
     postMessage(data: unknown) {
       void Promise.resolve().then(() => {
@@ -79,9 +87,11 @@ function stubObjectUrls() {
   }
   vi.stubGlobal("Worker", TestWorker);
   class TestURL extends URL {}
-  const createObjectURL = vi.fn(() => `blob:${location.origin}/pdf-preview`);
-  const revokeObjectURL = vi.fn();
-  Object.defineProperty(TestURL, "createObjectURL", { value: createObjectURL });
+  Object.defineProperty(TestURL, "createObjectURL", {
+    value: () => {
+      throw new Error("The PDF preview must not create its URL in the app document realm");
+    },
+  });
   Object.defineProperty(TestURL, "revokeObjectURL", { value: revokeObjectURL });
   vi.stubGlobal("URL", TestURL);
   return { createObjectURL, revokeObjectURL };
