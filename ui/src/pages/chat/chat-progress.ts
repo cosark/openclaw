@@ -269,7 +269,7 @@ export function resetWorkingProgress(): void {
 
 export type TurnRecap = { runtimeMs: number; outputTokens: number | null };
 
-// The pane owns one observed or history-matched run. Session-wide usage is a different fact and
+// The pane owns one watched run. Session-wide usage is a different fact and
 // may still describe the previous response when the terminal row arrives.
 export type TurnRecapWatch = {
   sessionKey: string;
@@ -308,7 +308,6 @@ export function resolveTurnRecap(
     indicator?: { runId?: string; request?: TurnRequest };
     startingNewTurn?: boolean;
     activeRunId?: string | null;
-    completedRunId?: string;
     row?: Pick<GatewaySessionRow, "lastRunId" | "status" | "runtimeMs" | "endedAt">;
     usageByRun?: ReadonlyMap<string, RunOutputUsage>;
   },
@@ -320,20 +319,16 @@ export function resolveTurnRecap(
     indicator,
     startingNewTurn,
     activeRunId,
-    completedRunId,
     row,
     usageByRun,
   } = params;
   let watch = host.turnRecapWatch;
   if (
-    watch &&
-    (watch.sessionKey !== sessionKey ||
-      watch.agentId !== agentId ||
-      watch.gatewayClient !== gatewayClient)
+    watch?.sessionKey !== sessionKey ||
+    watch.agentId !== agentId ||
+    watch.gatewayClient !== gatewayClient
   ) {
-    // A switched pane can still hold the previous owner's history. Keep its
-    // watch unidentified until activity establishes ownership again.
-    watch = { sessionKey, agentId, gatewayClient, runId: null, request: null, recap: null };
+    watch = null;
   }
   if (indicator || activeRunId) {
     const runId = indicator?.runId ?? activeRunId ?? null;
@@ -349,26 +344,6 @@ export function resolveTurnRecap(
         watch.request = indicator.request ?? null;
       }
     }
-  }
-  // A fresh pane can restore timing only for the completed reply actually loaded
-  // at its tail. A session row alone cannot identify the visible conversation.
-  if (
-    !watch &&
-    !indicator &&
-    !activeRunId &&
-    !startingNewTurn &&
-    completedRunId &&
-    row?.lastRunId === completedRunId &&
-    row.status === "done"
-  ) {
-    watch = {
-      sessionKey,
-      agentId,
-      gatewayClient,
-      runId: completedRunId,
-      request: null,
-      recap: null,
-    };
   }
   host.turnRecapWatch = watch;
   if (!watch?.runId) {
