@@ -82,11 +82,12 @@ describe.each([
             headers: conditional ? { "If-None-Match": "*" } : {},
           });
           expect(response.status).toBe(conditional ? 304 : 200);
-          expect(response.headers["content-security-policy"]).toBe(
+          expect(response.headers).toHaveProperty(
+            "content-security-policy",
             policy.replace("frame-ancestors 'self'", "frame-ancestors " + ancestors),
           );
-          expect(response.headers["x-frame-options"]).toBe("DENY");
-          expect(response.headers["x-content-type-options"]).toBe("nosniff");
+          expect(response.headers).toHaveProperty("x-frame-options", "DENY");
+          expect(response.headers).toHaveProperty("x-content-type-options", "nosniff");
           expect(response.headers["cache-control"]).toBe(
             remote ? "private, no-store" : "public, max-age=31536000, immutable",
           );
@@ -102,16 +103,29 @@ describe.each([
     for (const asset of ["index.html", "sw.js"]) {
       const response = await readHttp(server.origin + basePath + "/" + asset);
       expect(response.status).toBe(200);
-      expect(response.headers["content-security-policy"]).toContain(
-        "frame-ancestors " + (ingress ? ingress.frameAncestors.join(" ") : "'none'"),
+      expect(response.headers).toHaveProperty(
+        "content-security-policy",
+        expect.stringContaining(
+          "frame-ancestors " + (ingress ? ingress.frameAncestors.join(" ") : "'none'"),
+        ),
       );
-      expect(response.headers["content-security-policy"]).toContain("object-src 'none'");
-      expect(response.headers["x-frame-options"]).toBe(remote ? undefined : "DENY");
+      expect(response.headers).toHaveProperty(
+        "content-security-policy",
+        expect.stringContaining("object-src 'none'"),
+      );
+      if (remote) {
+        expect(response.headers).not.toHaveProperty("x-frame-options");
+      } else {
+        expect(response.headers).toHaveProperty("x-frame-options", "DENY");
+      }
     }
     const missing = await readHttp(server.origin + basePath + "/nested/pdf-preview-worker.js");
     expect(missing.status).toBe(404);
-    expect(missing.headers["content-security-policy"]).toContain(
-      "frame-ancestors " + (ingress ? ingress.frameAncestors.join(" ") : "'none'"),
+    expect(missing.headers).toHaveProperty(
+      "content-security-policy",
+      expect.stringContaining(
+        "frame-ancestors " + (ingress ? ingress.frameAncestors.join(" ") : "'none'"),
+      ),
     );
   });
 });
@@ -124,7 +138,10 @@ it("keeps an absent fixed worker a 404 without a creator policy or SPA document"
     for (const pathname of ["/pdf-preview-worker.js", "/__openclaw__/pdf-preview-worker.js"]) {
       const response = await readHttp(server.origin + pathname);
       expect(response.status).toBe(404);
-      expect(response.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+      expect(response.headers).toHaveProperty(
+        "content-security-policy",
+        expect.stringContaining("frame-ancestors 'none'"),
+      );
       expect(response.headers["cache-control"] ?? "").not.toContain("immutable");
     }
   } finally {
