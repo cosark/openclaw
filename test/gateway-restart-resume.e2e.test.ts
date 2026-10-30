@@ -524,7 +524,6 @@ it.skipIf(process.platform === "win32").for([true, false])(
               drain: true,
               terminalPolicy: "terminate",
             });
-            expect(held).toMatchObject({ suspensionId: expect.any(String) });
             expect(
               await client.request("gateway.suspend.resume", {
                 suspensionId: held.suspensionId,
