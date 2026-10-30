@@ -122,6 +122,7 @@ describe("session HTML preview compatibility", () => {
 
 describe("session HTML preview CSS admission", () => {
   it.each([
+    "/*",
     '@import "other.css";',
     String.raw`@\69mport "other.css";`,
     String.raw`@\000069 mport url(other.css);`,

@@ -165,12 +165,12 @@ describe("narrow session read owners", () => {
       };
       await seed(entry);
       const respond = vi.fn();
-      const dispatch = () =>
+      const dispatch = (document = html) =>
         handleGatewayRequest({
           req: gatewayRequest("preview", "sessions.files.preview", {
             sessionKey: key,
             path: "index.html",
-            html,
+            html: document,
           }),
           client: reader,
           context,
@@ -191,6 +191,20 @@ describe("narrow session read owners", () => {
       const fetched = await fetchSessionFileDownload(reader, resource);
       expect(fetched.response.statusCode).toBe(200);
       expect(Buffer.from(fetched.body as Uint8Array).toString()).toBe(code);
+      for (const css of ["body{color:black}", "/*a".repeat(21_846).slice(0, 65_536)]) {
+        await fs.writeFile(path.join(state.workspaceDir, "style.css"), css);
+        respond.mockClear();
+        await dispatch(
+          html.replace(
+            '<script defer src="app.js"></script>',
+            '<link rel="stylesheet" href="style.css">',
+          ),
+        );
+        expect(respond.mock.calls[0]?.[0], JSON.stringify(respond.mock.calls[0])).toBe(true);
+        expect(respond.mock.calls[0]?.[1]?.status).toBe(
+          css.startsWith("/*") ? "unsupported" : "ready",
+        );
+      }
       await seed({ ...entry, visibility: "draft", updatedAt: 2 });
       expect((await fetchSessionFileDownload(reader, resource)).response.statusCode).toBe(404);
       respond.mockClear();

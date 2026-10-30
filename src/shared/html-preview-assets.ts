@@ -18,6 +18,18 @@ type TextAssets = {
   attribute?: string;
 };
 type ExternalElement = { node: DefaultTreeAdapterTypes.Element; ref: string };
+type HtmlPreviewElement = { node: DefaultTreeAdapterTypes.Element; inert: boolean };
+export type HtmlPreviewAssetSelection = {
+  document: DefaultTreeAdapterTypes.Document;
+  elements: HtmlPreviewElement[];
+  policies: HtmlPreviewElement[];
+  parseError: boolean;
+  texts: TextAssets[];
+  stylesheets: ExternalElement[];
+  scripts: ExternalElement[];
+  refs: Set<string>;
+  hasBaseHref: boolean;
+};
 
 const FONT_PATH = /\.(?:woff2?|ttf|otf|eot)(?:[?#]|$)/i;
 
@@ -149,30 +161,28 @@ export function htmlPreviewCssReferences(source: string, stylesheet = ""): HtmlP
 export function htmlPreviewCssUnsupportedReason(source: string): string | undefined {
   // Consume strings/comments before decoding at-keywords and resource functions.
   const tokens = new RegExp(String.raw`\/\*[\s\S]*?\*\/|${CSS_STRING}|@?${CSS_NAME}|[\s\S]`, "gi");
-  let unsupportedReason: string | undefined;
   let match: RegExpExecArray | null;
   while ((match = tokens.exec(source))) {
     const token = match[0];
     if (token.startsWith("/*") || token.startsWith('"') || token.startsWith("'")) {
       if (token.length === 1 || (!token.startsWith("/*") && hasUnescapedCssNewline(token))) {
-        unsupportedReason ??= "Unrecognized CSS string syntax is unsupported.";
+        return "Unrecognized CSS string syntax is unsupported.";
       }
       continue;
     }
     const name = decodeCss(token).toLowerCase();
     if (["@import", "@font-face"].includes(name)) {
-      unsupportedReason ??= "CSS imports and font-loading rules are unsupported.";
+      return "CSS imports and font-loading rules are unsupported.";
     } else if (source[tokens.lastIndex] === "(") {
       if (["image", "image-set", "-webkit-image-set", "src"].includes(name)) {
-        unsupportedReason ??= "CSS string-valued resource functions are unsupported.";
+        return "CSS string-valued resource functions are unsupported.";
       }
       if (name !== "url") {
         continue;
       }
       const body = CSS_URL.exec(source.slice(tokens.lastIndex));
       if (!body || token.toLowerCase() !== "url") {
-        unsupportedReason ??= "Unrecognized CSS URL syntax is unsupported.";
-        continue;
+        return "Unrecognized CSS URL syntax is unsupported.";
       }
       tokens.lastIndex += body[0].length;
       const rawValue = body[0].slice(1, -1);
@@ -181,19 +191,19 @@ export function htmlPreviewCssUnsupportedReason(source: string): string | undefi
         value !== rawValue.replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/g, "") ||
         hasUnescapedCssNewline(value)
       ) {
-        unsupportedReason ??= "Unrecognized CSS URL syntax is unsupported.";
+        return "Unrecognized CSS URL syntax is unsupported.";
       }
       if (!value.startsWith('"') && !value.startsWith("'")) {
         const unescaped = value.replace(new RegExp(CSS_ESCAPE, "gi"), "");
         if (/[\s("']/.test(unescaped) || containsAsciiControlCharacter(unescaped)) {
-          unsupportedReason ??= "Unrecognized CSS URL syntax is unsupported.";
+          return "Unrecognized CSS URL syntax is unsupported.";
         }
       }
     } else if (token === "\\" || source.startsWith("/*", match.index)) {
-      unsupportedReason ??= "Unrecognized CSS escape or comment syntax is unsupported.";
+      return "Unrecognized CSS escape or comment syntax is unsupported.";
     }
   }
-  return unsupportedReason;
+  return undefined;
 }
 
 function isTemplate(
@@ -207,7 +217,7 @@ export function htmlPreviewAttribute(node: DefaultTreeAdapterTypes.Element, name
 }
 
 function htmlElements(document: DefaultTreeAdapterTypes.Document, allowScripts: boolean) {
-  const elements: { node: DefaultTreeAdapterTypes.Element; inert: boolean }[] = [];
+  const elements: HtmlPreviewElement[] = [];
   const pending = document.childNodes.toReversed().map((node) => ({ node, inert: false }));
   while (pending.length) {
     const current = pending.pop()!;
@@ -240,7 +250,11 @@ function htmlElements(document: DefaultTreeAdapterTypes.Document, allowScripts: 
 }
 
 /** The existing HTML asset graph is shared by legacy inlining and server admission. */
-export function collectHtmlPreviewAssets(source: string, allowScripts = true) {
+export function collectHtmlPreviewAssets(
+  source: string,
+  allowScripts = true,
+  options: { includeInlineCss?: boolean } = {},
+): HtmlPreviewAssetSelection {
   let parseError = false;
   const document = parse(source, {
     scriptingEnabled: allowScripts,
@@ -290,7 +304,7 @@ export function collectHtmlPreviewAssets(source: string, allowScripts = true) {
         continue;
       }
       let refs: HtmlPreviewReference[] = [];
-      if (attribute.name === "style") {
+      if (attribute.name === "style" && options.includeInlineCss !== false) {
         refs = htmlPreviewCssReferences(attribute.value);
       } else if (
         htmlElement &&
@@ -318,7 +332,12 @@ export function collectHtmlPreviewAssets(source: string, allowScripts = true) {
         attribute: attribute.name,
       });
     }
-    if (node.tagName === "style" && location.startTag && location.endTag) {
+    if (
+      options.includeInlineCss !== false &&
+      node.tagName === "style" &&
+      location.startTag &&
+      location.endTag
+    ) {
       const css = source.slice(location.startTag.endOffset, location.endTag.startOffset);
       addText({
         node,

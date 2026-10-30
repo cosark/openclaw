@@ -139,7 +139,8 @@ export function analyzeSessionHtmlPreview(
   allowScripts = true,
 ): { status: "no-policy" } | Unsupported | Supported {
   try {
-    const selection = collectHtmlPreviewAssets(source, allowScripts);
+    // The admitted policy forbids inline CSS, so no inline resource graph is needed.
+    const selection = collectHtmlPreviewAssets(source, allowScripts, { includeInlineCss: false });
     if (!selection.policies.length) {
       return { status: "no-policy" };
     }
