@@ -42,7 +42,6 @@ const workerProgram = fs.readFileSync(
 
 function stubObjectUrls() {
   // jsdom has no Worker. Keep its URL API separate: reverting to app-created PDF URLs must fail.
-  // The real-browser proof covers HTTP policy inheritance and native PDF pixels.
   const createObjectURL = vi.fn(() => `blob:${location.origin}/pdf-preview`);
   const revokeObjectURL = vi.fn();
   class TestWorker extends EventTarget {

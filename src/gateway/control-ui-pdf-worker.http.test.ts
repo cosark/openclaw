@@ -35,8 +35,9 @@ describe.each([
       offsets: [0],
       createListener: () =>
         createServer((req, res) => {
-          if (ingress)
+          if (ingress) {
             markGatewayIngressTransport(req, { kind: "remote-forwarded", context: ingress });
+          }
           void handleControlUiHttpRequest(req, res, {
             basePath,
             root: { kind: "bundled", path: root, publicAssetBuildId: "fixture" },
@@ -47,7 +48,7 @@ describe.each([
                 res.end();
               }
             })
-            .catch((error) => {
+            .catch((error: unknown) => {
               res.statusCode = 500;
               res.end(String(error));
             });
