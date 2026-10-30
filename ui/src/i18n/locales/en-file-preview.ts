@@ -19,6 +19,8 @@ const catalog = {
       unavailable: "Unable to open",
       outsideSessionBoundary: "This file is outside {session}'s workspace, and you can't open it.",
       assetsUnavailable: "Some assets couldn't be loaded ({count})",
+      cspPreviewUnsupported:
+        "This security policy or resource setup does not support relative resources in Preview. Use Source or Download for the original file.",
       previousMatch: "Previous match",
       nextMatch: "Next match",
       overwrite: "Overwrite",
