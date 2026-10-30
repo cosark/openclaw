@@ -431,6 +431,8 @@ suite.define(() => {
         await heading.waitFor();
         // Exercise the native element's existing mode input while retaining its real Gateway owner.
         const preview = panel.locator("openclaw-chat-html-preview");
+        const beforeStrictAsset = new URL("app.js", (await outer.getAttribute("src"))!).href;
+        expect((await page.request.get(beforeStrictAsset)).status()).toBe(200);
         await preview.evaluate((element: ChatHtmlPreviewElement) => {
           element.embedSandboxMode = "strict";
         });
@@ -448,7 +450,7 @@ suite.define(() => {
         expect(
           await document.locator("h1").evaluate((element) => getComputedStyle(element).color),
         ).toBe("rgb(12, 34, 56)");
-        expect((await page.request.get(assetUrl)).status()).toBe(404);
+        expect((await page.request.get(beforeStrictAsset)).status()).toBe(404);
         await preview.evaluate((element: ChatHtmlPreviewElement) => {
           element.embedSandboxMode = "scripts";
         });
