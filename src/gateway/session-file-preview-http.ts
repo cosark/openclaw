@@ -7,7 +7,6 @@ import {
   SESSION_FILE_PREVIEW_RESOURCE_PATH,
 } from "./artifact-download-grants.js";
 import { respondNotFound, respondPlainText } from "./control-ui-http-utils.js";
-import { sendMethodNotAllowed } from "./http-common.js";
 import {
   assertRemoteControlUiIngressCurrent,
   getRemoteControlUiIngressContext,
@@ -29,7 +28,8 @@ export async function handleSessionFilePreviewHttpRequest(
     return false;
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
-    sendMethodNotAllowed(res, "GET, HEAD");
+    res.setHeader("Allow", "GET, HEAD");
+    respondPlainText(res, 405, "Method Not Allowed");
     return true;
   }
   const relative = url.pathname.slice(SESSION_FILE_PREVIEW_RESOURCE_PATH.length);
