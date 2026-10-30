@@ -23,6 +23,8 @@ import {
   addSessionMember,
   removeSessionMember,
 } from "../../config/sessions/session-sharing-store.js";
+import * as readCandidates from "../../config/sessions/session-store-read-candidates.js";
+import * as targetInventory from "../../config/sessions/session-store-target-inventory.js";
 import {
   historyLane,
   projectionLane,
@@ -736,10 +738,21 @@ it.each([
               setEnvironmentData(key, previous);
             }
           });
+        // Path qualification stays in discovery workers. Live reads still take the
+        // per-read admission identity check every Gateway session read performs.
+        const hostQualification = [
+          vi.spyOn(targetInventory, "prepareSessionStoreTargetInventory"),
+          vi.spyOn(targetInventory, "captureSessionStoreReadCandidates"),
+          vi.spyOn(readCandidates, "captureSessionStoreReadCandidate"),
+        ];
         try {
           expect(await observe(f)).toMatchObject(unbound);
           expect(await observe(f)).toMatchObject(unbound);
           expect(await databaseArtifacts(sourcePaths)).toEqual(before);
+          expect(
+            hostQualification.map((spy) => spy.mock.calls.length),
+            "Gateway thread must not qualify session-store paths",
+          ).toEqual([0, 0, 0]);
           const nativeReadCounts = Array.from(counts);
           if (roleReader) {
             const member = f.client.authenticatedUserProfile!.profileId;
@@ -824,6 +837,9 @@ it.each([
             "worker must resolve original source identity",
           ).toBeGreaterThan(0);
         } finally {
+          for (const spy of hostQualification) {
+            spy.mockRestore();
+          }
           observer.mockRestore();
         }
       },
