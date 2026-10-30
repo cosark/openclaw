@@ -24,7 +24,11 @@ import type { SessionEntrySnapshotField } from "../config/sessions/session-entry
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createStaleWhileRevalidateCache } from "../infra/stale-while-revalidate-cache.js";
 import { getActiveSecretsRuntimeConfigSnapshot } from "../secrets/runtime-state.js";
+import { isArtifactPreservingStateRead } from "../state/artifact-preserving-state-reads.js";
 import { prepareGitHubPublicationSessionLifecycle } from "../state/github-publication-session-lifecycles.js";
+import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../state/openclaw-agent-db-contract.js";
+import { prepareOpenClawAgentDatabaseRegistrySnapshotRead } from "../state/openclaw-agent-db-registry-listing.js";
+import { registerOpenClawAgentDatabaseReadCandidateResource } from "../state/openclaw-agent-db-resources.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import {
   getSessionRepositoryWorkspaceStore,
@@ -166,6 +170,8 @@ export async function prepareGitHubPublicationSession(
   ];
   let retained: ReturnType<typeof retainPreparedSessionEntryPredicate> | undefined;
   let active = true;
+  let releaseSource: (() => void) | undefined;
+  let assertSourcePublication: (() => void) | undefined;
   const retire = () => {
     active = false;
     retained?.release();
@@ -192,7 +198,32 @@ export async function prepareGitHubPublicationSession(
     if (typeof source?.databaseIdentity !== "string") {
       return;
     }
+    const { path: sourcePath, agentId: sourceAgentId } = source;
     const databaseIdentity = `file:${source.databaseIdentity}`;
+    // Observational reads retain the source until response publication: a closed or
+    // replaced database must not keep serving facts read from the retired source.
+    if (isArtifactPreservingStateRead()) {
+      // Registry publications carry physical facts; unrelated registrations are not revocation.
+      assertSourcePublication = prepareOpenClawAgentDatabaseRegistrySnapshotRead({}, (mutation) =>
+        mutation.sources.every(
+          (registered) =>
+            (registered.path !== sourcePath &&
+              registered.physicalPath !== sourcePath &&
+              registered.identity !== databaseIdentity) ||
+            (mutation.kind === "upsert" &&
+              registered.agentId === sourceAgentId &&
+              registered.identity === databaseIdentity &&
+              registered.schemaVersion === OPENCLAW_AGENT_SCHEMA_VERSION),
+        ),
+      ).assertCurrent;
+      // Retain the original source's native retirement signal independently of the
+      // entry's writer postimages.
+      releaseSource = registerOpenClawAgentDatabaseReadCandidateResource({
+        path: sourcePath,
+        revoke: retire,
+        close: async () => retire(),
+      });
+    }
     retained = retainPreparedSessionEntryPredicate({
       databaseIdentity,
       sessionKey: key,
@@ -238,15 +269,18 @@ export async function prepareGitHubPublicationSession(
     }
   } catch (error) {
     retire();
+    releaseSource?.();
     throw error;
   }
   const release = () => {
     retire();
+    releaseSource?.();
   };
   return {
     loaded,
     readCurrent: (): PublicationSessionRead => {
       options.assertCurrent?.();
+      assertSourcePublication?.();
       if (!active || (retained && !retained.isCurrent())) {
         throw new GitHubPublicationSessionChangedError();
       }

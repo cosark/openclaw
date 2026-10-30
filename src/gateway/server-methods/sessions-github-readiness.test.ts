@@ -35,14 +35,18 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { OpenClawSchema } from "../../config/zod-schema.js";
 import { resolvePrivateSqliteSnapshotStagingRoot } from "../../infra/sqlite-private-directory.js";
 import { SQLITE_SNAPSHOT_PREFIX } from "../../infra/sqlite-snapshot-retirement.js";
+import { inspectDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity.js";
 import * as workerCpu from "../../infra/worker-cpu.js";
 import { withPluginRuntimeGatewayRequestScope } from "../../plugins/runtime/gateway-request-scope.js";
 import { holdStateRead } from "../../state/github-publication-fixtures.test-support.js";
 import { repositoryRow } from "../../state/github-publication.worker.test-support.js";
 import {
+  registerOpenClawAgentDatabase,
   unregisterOpenClawAgentDatabase,
+  readOpenClawAgentDatabaseRegistryToken,
   listOpenClawRegisteredAgentDatabases,
 } from "../../state/openclaw-agent-db-registry.js";
+import * as agentResources from "../../state/openclaw-agent-db-resources.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
 import { resolveOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.paths.js";
 import {
@@ -450,71 +454,121 @@ it("keeps an absent shared database absent and does not manufacture an exact rec
     expect(await databaseArtifacts()).toEqual(before);
   });
 });
-it.each(["connection", "profile", "grant", "session", "visibility", "session-metadata"] as const)(
-  "checks post-await %s custody before observation",
-  async (kind) => {
-    await fixture(
-      async (f) => {
-        const grant = new AbortController();
-        f.client.internal = {
-          operatorAccessAuthority: {
-            signal: grant.signal,
-            assertCurrent: () => grant.signal.throwIfAborted(),
-          },
-        };
-        const held = holdStateRead("githubPublications.sharedObservation");
-        const pending = call(f);
-        try {
-          await awaitGateBeforeSettlement(
-            held.ready,
-            pending,
-            "readiness returned before real receipt read",
+it.each([
+  "connection",
+  "profile",
+  "grant",
+  "session",
+  "visibility",
+  "source",
+  "registry-remove",
+  "published-replacement",
+  "registry-same",
+  "session-metadata",
+] as const)("checks post-await %s custody before observation", async (kind) => {
+  await fixture(
+    async (f) => {
+      const grant = new AbortController();
+      f.client.internal = {
+        operatorAccessAuthority: {
+          signal: grant.signal,
+          assertCurrent: () => grant.signal.throwIfAborted(),
+        },
+      };
+      // Start cold so the held read reacquires the agent source. The live profile
+      // catalog keeps its existing shared-store admission for method-policy checks.
+      await closeOpenClawAgentDatabasesAsync();
+      const original = resolveOpenClawAgentSqlitePath({ agentId: "main" });
+      const replacement = original + ".replacement";
+      if (kind === "published-replacement") {
+        await fs.copyFile(original, replacement);
+      }
+      const sourceWitness = vi.spyOn(
+        agentResources,
+        "registerOpenClawAgentDatabaseReadCandidateResource",
+      );
+      const registryToken = readOpenClawAgentDatabaseRegistryToken({ env: process.env });
+      const physicalSource = inspectDatabasePathIdentitySync(original);
+      const held = holdStateRead("githubPublications.sharedObservation");
+      const pending = call(f);
+      try {
+        await awaitGateBeforeSettlement(
+          held.ready,
+          pending,
+          "readiness returned before real receipt read",
+        );
+        if (kind === "connection") {
+          f.disconnect();
+        } else if (kind === "profile") {
+          f.client.authenticatedUserProfile = undefined;
+        } else if (kind === "grant") {
+          grant.abort();
+        } else if (kind === "source") {
+          await closeOpenClawAgentDatabasesAsync();
+        } else if (
+          kind === "registry-remove" ||
+          kind === "published-replacement" ||
+          kind === "registry-same"
+        ) {
+          expect(sourceWitness.mock.calls.some(([source]) => source.path === original)).toBe(true);
+          if (kind === "registry-same") {
+            registerOpenClawAgentDatabase({ agentId: "main", path: original });
+          } else if (kind === "registry-remove") {
+            unregisterOpenClawAgentDatabase({ agentId: "main", path: original });
+          } else {
+            await fs.rename(original, original + ".retired");
+            await fs.rename(replacement, original);
+            registerOpenClawAgentDatabase({ agentId: "main", path: original });
+          }
+        } else if (kind === "session-metadata") {
+          await upsertSessionEntryCore({ agentId: "main", sessionKey }, { label: "Changed title" });
+        } else if (kind === "visibility") {
+          await upsertSessionEntryCore({ agentId: "main", sessionKey }, { visibility: "draft" });
+        } else {
+          await upsertSessionEntryCore(
+            { agentId: "main", sessionKey },
+            { lifecycleRevision: randomUUID() },
           );
-          if (kind === "connection") {
-            f.disconnect();
-          } else if (kind === "profile") {
-            f.client.authenticatedUserProfile = undefined;
-          } else if (kind === "grant") {
-            grant.abort();
-          } else if (kind === "session-metadata") {
-            await upsertSessionEntryCore(
-              { agentId: "main", sessionKey },
-              { label: "Changed title" },
-            );
-          } else if (kind === "visibility") {
-            await upsertSessionEntryCore({ agentId: "main", sessionKey }, { visibility: "draft" });
-          } else {
-            await upsertSessionEntryCore(
-              { agentId: "main", sessionKey },
-              { lifecycleRevision: randomUUID() },
-            );
-          }
-          held.release();
-          const [ok, payload, error] = await pending;
-          if (kind === "session-metadata") {
-            expect(ok).toBe(true);
-            expect(payload).toMatchObject(unbound);
-            expect(error).toBeUndefined();
-          } else {
-            expect(ok).toBe(false);
-            expect(payload).toBeUndefined();
-            expect(error).toBeDefined();
-          }
-        } finally {
-          held.release();
-          await pending;
-          held.restore();
         }
-      },
-      {
-        personal: true,
-        scopes: ["operator.sessions.read"],
-        others: "view",
-        foreign: kind === "visibility",
-      },
-    );
-  },
-);
+        held.release();
+        const [ok, payload, error] = await pending;
+        expect((await databaseArtifacts([])).snapshotCopies, "no agent snapshot copies").toBe(0);
+        if (kind.startsWith("registry-") || kind === "published-replacement") {
+          const registered = listOpenClawRegisteredAgentDatabases({ env: process.env }).some(
+            (row) => row.agentId === "main" && row.path === original,
+          );
+          const physicalUnchanged =
+            inspectDatabasePathIdentitySync(original)?.key === physicalSource?.key;
+          const registryAdvanced =
+            readOpenClawAgentDatabaseRegistryToken({ env: process.env }) !== registryToken;
+          expect(registryAdvanced).toBe(true);
+          expect(registered).toBe(kind !== "registry-remove");
+          expect(physicalUnchanged).toBe(kind !== "published-replacement");
+        }
+        if (kind === "registry-same" || kind === "session-metadata") {
+          expect(ok).toBe(true);
+          expect(payload).toMatchObject(unbound);
+          expect(error).toBeUndefined();
+        } else {
+          expect(ok).toBe(false);
+          expect(payload).toBeUndefined();
+          expect(error).toBeDefined();
+        }
+      } finally {
+        held.release();
+        await pending;
+        held.restore();
+        sourceWitness.mockRestore();
+      }
+    },
+    {
+      personal: true,
+      scopes: ["operator.sessions.read"],
+      others: "view",
+      foreign: kind === "visibility",
+    },
+  );
+});
 it("rejects incompatible fields and pending authentication without starting refresh", async () => {
   await fixture(async (f) => {
     for (const params of [
