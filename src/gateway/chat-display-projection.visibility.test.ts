@@ -247,11 +247,13 @@ it.each([false, true])("preserves separate reasoning items after a heartbeat: %s
   expectProjection(
     [...(heartbeat ? [userTextMessage(HEARTBEAT_PROMPT)] : []), ...reasoning, answer],
     [
-      ...reasoning.map((message, index) =>
-        heartbeat && index === 0
-          ? { ...message, __openclaw: { ...message["__openclaw"], turnBoundary: true } }
-          : message,
-      ),
+      heartbeat
+        ? {
+            ...reasoning[0],
+            __openclaw: { id: "first-item", seq: 2, runId: "run-1", turnBoundary: true },
+          }
+        : reasoning[0],
+      reasoning[1],
       answer,
     ],
   );
