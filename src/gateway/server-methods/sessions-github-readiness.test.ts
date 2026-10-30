@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
-import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { getEnvironmentData, setEnvironmentData } from "node:worker_threads";
@@ -32,18 +31,16 @@ import {
 } from "../../config/sessions/session-transcript-worker-resources.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { OpenClawSchema } from "../../config/zod-schema.js";
-import { inspectDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity.js";
+import { resolvePrivateSqliteSnapshotStagingRoot } from "../../infra/sqlite-private-directory.js";
+import { SQLITE_SNAPSHOT_PREFIX } from "../../infra/sqlite-snapshot-retirement.js";
 import * as workerCpu from "../../infra/worker-cpu.js";
 import { withPluginRuntimeGatewayRequestScope } from "../../plugins/runtime/gateway-request-scope.js";
 import { holdStateRead } from "../../state/github-publication-fixtures.test-support.js";
 import { repositoryRow } from "../../state/github-publication.worker.test-support.js";
 import {
-  registerOpenClawAgentDatabase,
   unregisterOpenClawAgentDatabase,
-  readOpenClawAgentDatabaseRegistryToken,
   listOpenClawRegisteredAgentDatabases,
 } from "../../state/openclaw-agent-db-registry.js";
-import * as agentResources from "../../state/openclaw-agent-db-resources.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
 import { resolveOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.paths.js";
 import {
@@ -218,24 +215,28 @@ function seed(worktree: Awaited<ReturnType<typeof bind>>, key = sessionKey) {
     }),
   );
 }
+// Readiness reads through the live owner: stored bytes stay unchanged and no private
+// whole-database copy is staged. SQLite's own -wal/-shm on open are not custody changes.
 async function databaseArtifacts(
   paths = [resolveOpenClawStateSqlitePath(), resolveOpenClawAgentSqlitePath({ agentId: "main" })],
 ) {
   const values: Record<string, string> = {};
   for (const pathname of paths) {
-    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-      try {
-        values[pathname + suffix] = createHash("sha256")
-          .update(await fs.readFile(pathname + suffix))
-          .digest("hex");
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-          throw error;
-        }
+    try {
+      values[pathname] = createHash("sha256")
+        .update(await fs.readFile(pathname))
+        .digest("hex");
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        throw error;
       }
     }
   }
-  return values;
+  const staging = resolvePrivateSqliteSnapshotStagingRoot();
+  const copies = (await fs.readdir(staging).catch(() => [] as string[])).filter((name) =>
+    name.startsWith(SQLITE_SNAPSHOT_PREFIX),
+  );
+  return { ...values, snapshotCopies: copies.length };
 }
 async function cold() {
   await closeOpenClawAgentDatabasesAsync();
@@ -447,120 +448,71 @@ it("keeps an absent shared database absent and does not manufacture an exact rec
     expect(await databaseArtifacts()).toEqual(before);
   });
 });
-it.each([
-  "connection",
-  "profile",
-  "grant",
-  "session",
-  "visibility",
-  "source",
-  "registry-remove",
-  "published-replacement",
-  "registry-same",
-  "session-metadata",
-] as const)("checks post-await %s custody before observation", async (kind) => {
-  await fixture(
-    async (f) => {
-      const grant = new AbortController();
-      f.client.internal = {
-        operatorAccessAuthority: {
-          signal: grant.signal,
-          assertCurrent: () => grant.signal.throwIfAborted(),
-        },
-      };
-      // Reacquire agent authority from a private snapshot. The live profile catalog
-      // keeps its existing shared-store admission for method-policy checks.
-      await closeOpenClawAgentDatabasesAsync();
-      const original = resolveOpenClawAgentSqlitePath({ agentId: "main" });
-      const replacement = original + ".replacement";
-      if (kind === "published-replacement") {
-        await fs.copyFile(original, replacement);
-      }
-      const sourceWitness = vi.spyOn(
-        agentResources,
-        "registerOpenClawAgentDatabaseReadCandidateResource",
-      );
-      const registryToken = readOpenClawAgentDatabaseRegistryToken({ env: process.env });
-      const physicalSource = inspectDatabasePathIdentitySync(original);
-      const held = holdStateRead("githubPublications.sharedObservation");
-      const pending = call(f);
-      try {
-        await awaitGateBeforeSettlement(
-          held.ready,
-          pending,
-          "readiness returned before real receipt read",
-        );
-        if (kind === "connection") {
-          f.disconnect();
-        } else if (kind === "profile") {
-          f.client.authenticatedUserProfile = undefined;
-        } else if (kind === "grant") {
-          grant.abort();
-        } else if (kind === "source") {
-          await closeOpenClawAgentDatabasesAsync();
-        } else if (
-          kind === "registry-remove" ||
-          kind === "published-replacement" ||
-          kind === "registry-same"
-        ) {
-          expect(sourceWitness.mock.calls.some(([source]) => source.path === original)).toBe(true);
-          if (kind === "registry-same") {
-            registerOpenClawAgentDatabase({ agentId: "main", path: original });
-          } else if (kind === "registry-remove") {
-            unregisterOpenClawAgentDatabase({ agentId: "main", path: original });
+it.each(["connection", "profile", "grant", "session", "visibility", "session-metadata"] as const)(
+  "checks post-await %s custody before observation",
+  async (kind) => {
+    await fixture(
+      async (f) => {
+        const grant = new AbortController();
+        f.client.internal = {
+          operatorAccessAuthority: {
+            signal: grant.signal,
+            assertCurrent: () => grant.signal.throwIfAborted(),
+          },
+        };
+        const held = holdStateRead("githubPublications.sharedObservation");
+        const pending = call(f);
+        try {
+          await awaitGateBeforeSettlement(
+            held.ready,
+            pending,
+            "readiness returned before real receipt read",
+          );
+          if (kind === "connection") {
+            f.disconnect();
+          } else if (kind === "profile") {
+            f.client.authenticatedUserProfile = undefined;
+          } else if (kind === "grant") {
+            grant.abort();
+          } else if (kind === "session-metadata") {
+            await upsertSessionEntryCore(
+              { agentId: "main", sessionKey },
+              { label: "Changed title" },
+            );
+          } else if (kind === "visibility") {
+            await upsertSessionEntryCore({ agentId: "main", sessionKey }, { visibility: "draft" });
           } else {
-            await fs.rename(original, original + ".retired");
-            await fs.rename(replacement, original);
-            registerOpenClawAgentDatabase({ agentId: "main", path: original });
+            await upsertSessionEntryCore(
+              { agentId: "main", sessionKey },
+              { lifecycleRevision: randomUUID() },
+            );
           }
-        } else if (kind === "session-metadata") {
-          await upsertSessionEntryCore({ agentId: "main", sessionKey }, { label: "Changed title" });
-        } else if (kind === "visibility") {
-          await upsertSessionEntryCore({ agentId: "main", sessionKey }, { visibility: "draft" });
-        } else {
-          await upsertSessionEntryCore(
-            { agentId: "main", sessionKey },
-            { lifecycleRevision: randomUUID() },
-          );
+          held.release();
+          const [ok, payload, error] = await pending;
+          if (kind === "session-metadata") {
+            expect(ok).toBe(true);
+            expect(payload).toMatchObject(unbound);
+            expect(error).toBeUndefined();
+          } else {
+            expect(ok).toBe(false);
+            expect(payload).toBeUndefined();
+            expect(error).toBeDefined();
+          }
+        } finally {
+          held.release();
+          await pending;
+          held.restore();
         }
-        held.release();
-        const [ok, payload, error] = await pending;
-        if (kind.startsWith("registry-") || kind === "published-replacement") {
-          const registered = listOpenClawRegisteredAgentDatabases({ env: process.env }).some(
-            (row) => row.agentId === "main" && row.path === original,
-          );
-          const physicalUnchanged =
-            inspectDatabasePathIdentitySync(original)?.key === physicalSource?.key;
-          const registryAdvanced =
-            readOpenClawAgentDatabaseRegistryToken({ env: process.env }) !== registryToken;
-          expect(registryAdvanced).toBe(true);
-          expect(registered).toBe(kind !== "registry-remove");
-          expect(physicalUnchanged).toBe(kind !== "published-replacement");
-        }
-        if (kind === "registry-same" || kind === "session-metadata") {
-          expect(ok).toBe(true);
-          expect(payload).toMatchObject(unbound);
-          expect(error).toBeUndefined();
-        } else {
-          expect(ok).toBe(false);
-          expect(payload).toBeUndefined();
-          expect(error).toBeDefined();
-        }
-      } finally {
-        held.release();
-        await pending;
-        held.restore();
-        sourceWitness.mockRestore();
-      }
-    },
-    {
-      personal: true,
-      scopes: ["operator.sessions.read"],
-      others: "view",
-      foreign: kind === "visibility",
-    },
-  );
-});
+      },
+      {
+        personal: true,
+        scopes: ["operator.sessions.read"],
+        others: "view",
+        foreign: kind === "visibility",
+      },
+    );
+  },
+);
 it("rejects incompatible fields and pending authentication without starting refresh", async () => {
   await fixture(async (f) => {
     for (const params of [
@@ -757,8 +709,8 @@ it.each([
         ).toBe(false);
         const before = await databaseArtifacts(sourcePaths);
         expect(before).toHaveProperty(databasePath);
-        expect(before[databasePath + "-wal"]).toBeUndefined();
-        expect(before[databasePath + "-shm"]).toBeUndefined();
+        expect(fsSync.existsSync(databasePath + "-wal")).toBe(false);
+        expect(fsSync.existsSync(databasePath + "-shm")).toBe(false);
         const counts = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4));
         const create = workerCpu.createCpuTrackedWorker;
         const observer = vi
@@ -784,53 +736,10 @@ it.each([
               setEnvironmentData(key, previous);
             }
           });
-        const hostReads: Record<string, string[]> = { cold: [], warm: [] };
-        let observation: "cold" | "warm" = "cold";
-        const stat = fsSync.statSync;
-        const realpath = fsSync.realpathSync.native;
-        const hostStat = vi.spyOn(fsSync, "statSync").mockImplementation((...args) => {
-          if (args[0] === databasePath) {
-            hostReads[observation]!.push(new Error("statSync").stack ?? "statSync");
-          }
-          return Reflect.apply(stat, fsSync, args);
-        });
-        const hostRealpath = vi
-          .spyOn(fsSync.realpathSync, "native")
-          .mockImplementation((...args) => {
-            if (args[0] === databasePath) {
-              hostReads[observation]!.push(new Error("realpathSync").stack ?? "realpathSync");
-            }
-            return Reflect.apply(realpath, fsSync.realpathSync, args);
-          });
-        const asyncStat = fs.stat;
-        const asyncRealpath = fs.realpath;
-        const hostAsyncStat = vi.spyOn(fs, "stat").mockImplementation((...args) => {
-          if (args[0] === databasePath) {
-            hostReads[observation]!.push(new Error("stat").stack ?? "stat");
-          }
-          return Reflect.apply(asyncStat, fs, args);
-        });
-        const hostAsyncRealpath = vi.spyOn(fs, "realpath").mockImplementation((...args) => {
-          if (args[0] === databasePath) {
-            hostReads[observation]!.push(new Error("realpath").stack ?? "realpath");
-          }
-          return Reflect.apply(asyncRealpath, fs, args);
-        });
-        syncBuiltinESMExports();
         try {
           expect(await observe(f)).toMatchObject(unbound);
-          observation = "warm";
           expect(await observe(f)).toMatchObject(unbound);
-          hostStat.mockRestore();
-          hostRealpath.mockRestore();
-          hostAsyncStat.mockRestore();
-          hostAsyncRealpath.mockRestore();
-          syncBuiltinESMExports();
           expect(await databaseArtifacts(sourcePaths)).toEqual(before);
-          expect(hostReads, "Gateway must not stat or realpath the original database").toEqual({
-            cold: [],
-            warm: [],
-          });
           const nativeReadCounts = Array.from(counts);
           if (roleReader) {
             const member = f.client.authenticatedUserProfile!.profileId;
@@ -901,7 +810,11 @@ it.each([
           expect(nativeReadCounts[0], "real worker SQLite opens must be observed").toBeGreaterThan(
             0,
           );
-          expect(nativeReadCounts[1], "readiness must open private images, not the source").toBe(0);
+          // A private image of a live multi-GB agent database stalls the whole Gateway.
+          expect(
+            nativeReadCounts[1],
+            "readiness must read the source through its owner, not a private image",
+          ).toBeGreaterThan(0);
           expect(
             nativeReadCounts[2],
             "worker must inspect original source identity",
@@ -911,11 +824,6 @@ it.each([
             "worker must resolve original source identity",
           ).toBeGreaterThan(0);
         } finally {
-          hostStat.mockRestore();
-          hostRealpath.mockRestore();
-          hostAsyncStat.mockRestore();
-          hostAsyncRealpath.mockRestore();
-          syncBuiltinESMExports();
           observer.mockRestore();
         }
       },
