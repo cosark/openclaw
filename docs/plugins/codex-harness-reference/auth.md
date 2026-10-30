@@ -210,9 +210,13 @@ runtime checks the native provider's endpoint and command-auth configuration
 before starting a thread. OpenClaw does not forward stored profiles or ambient
 `CODEX_API_KEY`, `OPENAI_API_KEY`, or `CODEX_ACCESS_TOKEN` credentials.
 Do not combine this mode with an OpenClaw API key, profile pin, custom headers,
-or request transport overrides. The native provider cannot combine command auth
-with another credential source either; native `http_headers` and
-`env_http_headers` overrides must be empty.
+or request transport overrides in OpenClaw. Explicit authentication and headers
+in Codex's native configuration remain owned by Codex, including `gateway_oauth`
+alongside the primary token command. Codex validates conflicts, stores and refreshes
+its secondary account, and may authenticate catalog requests during startup.
+The helper can represent a user or service; a native secondary account is not
+implicitly the OpenClaw or Team requester. This mode does not add an OpenClaw
+login flow or import either native credential into an OpenClaw profile.
 
 This mode does not support the embedded OpenClaw runtime, isolated completions,
 supervised native sessions, manual compaction, or remote-exec cloud placement.

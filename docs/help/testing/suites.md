@@ -465,6 +465,18 @@ Runtime builds also require the existing lock-pinned Darwin worker-native archiv
 
 Use the ordinary local config, not the CI-only prebuilt config. The adapter uses the standard test selection to prepare `qaRuntime` artifacts inside the container for tests that consume built runtime, including private-QA artifacts when required. Source-only selections do not pay for a runtime build and retain the 8 GiB container memory cap. Runs that prepare built artifacts use a bounded 16 GiB cap to accommodate the compiler heap and native build memory; CPU, network, filesystem, and process limits are unchanged. For the standard Control UI E2E config, it retains the private-QA `ciArtifacts` build before admitting tests; backend readiness alone does not mean the dashboard assets are ready. The host’s live-Gateway artifact admission is unchanged. The isolated source snapshot uses tracked working-tree files, including staged new files; stage a new test before selecting it. Keep source and dependencies unchanged during the invocation, and keep dependency installation separate. The initial interface supports exact tracked test files, a tracked config, and console reporters; it does not export files from the disposable snapshot. This route is not suitable for live-provider tests or tests that must contact services outside their own container.
 
+### E2E: native Codex command and gateway OAuth
+
+`test/e2e/qa-lab/runtime/codex-native-command-auth.e2e.test.ts` remains in the ordinary `test:e2e:gateway` suite. Its primary-command case runs on supported native Codex platforms. Its combined-auth case uses the Linux Secret Service backend and runs whenever this file is selected on Linux; it is explicitly skipped on other platforms, whose credential stores this fixture does not qualify. Missing Linux prerequisites are setup failures, not skips. The current automatic CI inventories do not select this full Gateway composition; ordinary CI success is not evidence for it.
+
+For the isolated runner above, prepare the trusted image with `dbus`, `gnome-keyring`, and `libglib2.0-bin` (Debian/Ubuntu package names), in addition to the runner’s existing prerequisites. Image preparation is separate from the network-none test invocation; the runner never installs these packages. The fixture starts a real Secret Service on a fresh private D-Bus address with task-owned HOME/XDG directories, seeds a synthetic native OAuth account, closes that native process, and then proves refresh and both native credentials through a new Gateway process. It never uses the host session bus or keyring. No Podman-specific environment flag is required by the fixture.
+
+```bash
+node scripts/run-vitest.mjs --isolated-image "$IMAGE_ID" run \
+  --config test/vitest/vitest.e2e.config.ts --configLoader runner \
+  test/e2e/qa-lab/runtime/codex-native-command-auth.e2e.test.ts --maxWorkers=1
+```
+
 ### E2E: OpenShell backend smoke
 
 - Command: `pnpm test:e2e:openshell`

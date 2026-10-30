@@ -3,7 +3,7 @@ import type { CodexAppServerClient } from "./client.js";
 import { readProviderField } from "./inference-provider-config.js";
 import { isJsonObject, type CodexGetAccountResponse, type JsonObject } from "./protocol.js";
 
-/** Admit only the native command/endpoint pair selected by the host, before thread creation. */
+/** Bind the host-selected route; Codex owns native credential composition and validation. */
 export function assertCodexNativeCommandAuthConfig(params: {
   provider: string;
   baseUrl: string | undefined;
@@ -20,18 +20,10 @@ export function assertCodexNativeCommandAuthConfig(params: {
     field("wire_api") !== "responses" ||
     !isJsonObject(auth) ||
     typeof auth.command !== "string" ||
-    !auth.command.trim() ||
-    field("env_key") != null ||
-    field("experimental_bearer_token") != null ||
-    field("requires_openai_auth") === true ||
-    field("aws") != null ||
-    ["http_headers", "env_http_headers"].some((name) => {
-      const headers = field(name);
-      return isJsonObject(headers) && Object.keys(headers).length > 0;
-    })
+    !auth.command.trim()
   ) {
     throw new Error(
-      "Native command auth requires a matching Codex model_providers entry with command auth, the same HTTPS Responses endpoint, and no other credential source.",
+      "Native command auth requires a matching Codex model_providers entry with command auth and the same HTTPS Responses endpoint.",
     );
   }
 }
