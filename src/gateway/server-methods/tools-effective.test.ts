@@ -2,10 +2,12 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
+import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
 import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import type { McpToolCatalog } from "../../agents/agent-bundle-mcp-types.js";
 import * as conversationToolPolicyPipeline from "../../agents/conversation-tool-policy-pipeline.js";
 import * as toolSchemaRuntime from "../../agents/embedded-agent-runner/tool-schema-runtime.js";
+import type { SandboxToolPolicy } from "../../agents/sandbox/types.js";
 import { createStubTool } from "../../agents/test-helpers/agent-tool-stubs.js";
 import { makeProviderModelFixture } from "../../agents/test-helpers/provider-model-fixture.js";
 import type { EffectiveToolInventoryResult as ToolsEffectivePayload } from "../../agents/tools-effective-inventory.types.js";
@@ -20,7 +22,13 @@ import {
 import { createPluginRecord } from "../../plugins/status.test-helpers.js";
 import { setPluginToolMeta } from "../../plugins/tool-metadata.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.paths.js";
+import {
+  activePlacement,
+  localPlacement,
+} from "../worker-environments/placement-suite.test-support.js";
+import type { SessionWorkerPlacementContext } from "../worker-environments/session-placement-lifecycle.js";
 import { fixedStoreOwnershipConfig } from "./sessions-fixed-store.test-support.js";
+import { makeCoreInventory, makeMcpTool } from "./tools-effective.fixtures.test-support.js";
 import { toolsEffectiveHandlers, testing } from "./tools-effective.js";
 
 type InventoryModule = typeof import("../../agents/tools-effective-inventory.js");
@@ -78,7 +86,7 @@ const runtimeMocks = vi.hoisted(() => ({
     serverNames: [] as string[],
   })),
   resolveAgentWorkspaceDir: vi.fn(() => "/tmp/workspace-main"),
-  resolveEffectiveToolInventory: vi.fn(),
+  resolveEffectiveToolInventory: vi.fn<InventoryModule["resolveEffectiveToolInventory"]>(),
   readAcpSessionMetaForEntryAsync: vi.fn<
     typeof import("../../acp/runtime/session-meta-readonly.js").readAcpSessionMetaForEntryAsync
   >(async () => undefined),
@@ -179,7 +187,7 @@ type RespondCall = [boolean, unknown?, { code: number; message: string }?];
 async function invokeTools(
   params: Record<string, unknown> = { sessionKey: "main:abc" },
   cfg: Record<string, unknown> = {},
-  localEmbedded = false,
+  placementContext: SessionWorkerPlacementContext & { localEmbedded?: boolean } = {},
 ) {
   const respond = vi.fn();
   await expectDefined(
@@ -188,7 +196,7 @@ async function invokeTools(
   )({
     params,
     respond: respond as never,
-    context: { getRuntimeConfig: () => cfg, localEmbedded } as never,
+    context: { getRuntimeConfig: () => cfg, ...placementContext } as never,
     client: null,
     req: { type: "req", id: "req-1", method: "tools.effective" },
     isWebchatConnect: () => false,
@@ -213,60 +221,6 @@ function firstRespondCall(respond: ReturnType<typeof vi.fn>): RespondCall | unde
 
 function payloadOf(respond: ReturnType<typeof vi.fn>) {
   return firstRespondCall(respond)?.[1] as ToolsEffectivePayload;
-}
-
-function makeMcpTool(
-  params: Record<string, unknown> = { type: "object", properties: {} },
-  identity = {
-    name: "reproProbe__probe_tool",
-    label: "Probe Tool",
-    toolName: "probe_tool",
-    serverName: "reproProbe",
-    deniedBySession: false,
-  },
-) {
-  const tool = {
-    name: identity.name,
-    label: identity.label,
-    description: "Probe from MCP",
-    parameters: params,
-    execute: vi.fn(),
-  };
-  setPluginToolMeta(tool, {
-    pluginId: "bundle-mcp",
-    optional: false,
-    mcp: {
-      serverName: identity.serverName,
-      safeServerName: identity.serverName,
-      toolName: identity.toolName,
-      operation: "tool",
-      ...(identity.deniedBySession ? { deniedBySession: true } : {}),
-    },
-  });
-  return tool;
-}
-
-const coreTool = {
-  id: "exec",
-  label: "Exec",
-  description: "Run shell commands",
-  rawDescription: "Run shell commands",
-  source: "core" as const,
-};
-
-function makeCoreInventory(tool: Partial<typeof coreTool> = {}): ToolsEffectivePayload {
-  return {
-    agentId: "main",
-    profile: "coding",
-    groups: [
-      {
-        id: "core",
-        label: "Built-in tools",
-        source: "core",
-        tools: [{ ...coreTool, ...tool }],
-      },
-    ],
-  };
 }
 
 const makeMcpCatalog = () => ({ version: 1, generatedAt: 1, servers: {}, tools: [] });
@@ -446,6 +400,7 @@ describe("tools.effective handler", () => {
       { runtime: "openclaw", localEmbedded: true, expected: false },
       { runtime: "openclaw", acp: true, expected: false },
       { runtime: "openclaw", expected: true },
+      { runtime: "openclaw", requiredSandbox: true, expected: true },
       { runtime: "openclaw", denied: true, expected: false },
     ]) {
       const cfg: OpenClawConfig = {
@@ -462,7 +417,13 @@ describe("tools.effective handler", () => {
           ],
         },
       };
-      mockSession({ agentHarnessId: scenario.historical }, { cfg });
+      mockSession(
+        {
+          agentHarnessId: scenario.historical,
+          sandbox: scenario.requiredSandbox ? "required" : undefined,
+        },
+        { cfg },
+      );
       runtimeMocks.readAcpSessionMetaForEntryAsync.mockResolvedValue(
         scenario.acp
           ? {
@@ -475,13 +436,19 @@ describe("tools.effective handler", () => {
             }
           : undefined,
       );
-      const respond = await invokeTools({ sessionKey: "main:abc" }, cfg, scenario.localEmbedded);
+      const respond = await invokeTools({ sessionKey: "main:abc" }, cfg, {
+        localEmbedded: scenario.localEmbedded,
+      });
       expectResponsesOk(respond);
       const tools = payloadOf(respond).groups.flatMap((group) => group.tools);
       expect(tools.some((tool) => tool.id === "gateway" || tool.id === "nodes")).toBe(false);
       const githubTools = tools.filter((tool) => tool.id.startsWith("github_"));
       expect(githubTools.map((tool) => tool.id)).toEqual(
-        scenario.expected ? ["github_identity_status", "github_publish"] : [],
+        scenario.expected
+          ? scenario.requiredSandbox
+            ? ["github_publish"]
+            : ["github_identity_status", "github_publish"]
+          : [],
       );
       if (scenario.expected) {
         const description = expectDefined(
@@ -661,6 +628,131 @@ describe("tools.effective handler", () => {
     expect(notice?.message).toContain('"alpha", "zeta"');
     expect(notice?.servers).toEqual(["alpha", "zeta"]);
   });
+
+  it.each<{
+    name: string;
+    required: boolean;
+    sandboxTools?: SandboxToolPolicy;
+    allowed: boolean;
+    read: boolean;
+  }>([
+    { name: "ordinary", required: false, allowed: true, read: true },
+    { name: "required", required: true, allowed: false, read: true },
+    {
+      name: "empty allow",
+      required: true,
+      sandboxTools: { allow: [], deny: [] },
+      allowed: true,
+      read: true,
+    },
+    {
+      name: "deny all",
+      required: true,
+      sandboxTools: { deny: ["*"] },
+      allowed: false,
+      read: false,
+    },
+  ])(
+    "applies saved sandbox policy to core and warm MCP tools ($name)",
+    async ({ required, sandboxTools, allowed, read }) => {
+      const { resolveEffectiveToolInventory } = await vi.importActual<InventoryModule>(
+        "../../agents/tools-effective-inventory.js",
+      );
+      runtimeMocks.resolveEffectiveToolInventory.mockImplementation(resolveEffectiveToolInventory);
+      runtimeMocks.applyFinalEffectiveToolPolicy.mockImplementation(applyFinalEffectiveToolPolicy);
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { sandbox: { mode: "off" } } },
+        tools: {
+          web: { search: { enabled: true, provider: "brave" } },
+          sandbox: { tools: sandboxTools },
+        },
+      };
+      mockSession({ sandbox: required ? "required" : undefined, sandboxMode: "off" }, { cfg });
+      mockMcpTools([makeMcpTool()]);
+      const respond = await invokeTools({ sessionKey: "main:abc" }, cfg);
+      expectResponsesOk(respond);
+      const ids = new Set(
+        payloadOf(respond).groups.flatMap((group) => group.tools.map((tool) => tool.id)),
+      );
+      expect(ids.has("read")).toBe(read);
+      expect([ids.has("web_search"), ids.has("reproProbe__probe_tool")]).toEqual([
+        allowed,
+        allowed,
+      ]);
+    },
+  );
+
+  it("separates saved sandbox modes across in-flight and warm inventory requests", async () => {
+    const { resolveEffectiveToolInventory } = await vi.importActual<InventoryModule>(
+      "../../agents/tools-effective-inventory.js",
+    );
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    runtimeMocks.resolveEffectiveToolInventory.mockImplementation(async (params) => {
+      started.resolve();
+      await release.promise;
+      return resolveEffectiveToolInventory(params);
+    });
+    const cfg: OpenClawConfig = {
+      agents: { defaults: { sandbox: { mode: "all" } } },
+      tools: { web: { search: { enabled: true, provider: "brave" } } },
+    };
+    mockSession({ sandboxMode: "off" }, { cfg });
+    const ordinary = invokeTools({ sessionKey: "main:abc" }, cfg);
+    mockSession({}, { cfg });
+    const sandboxed = invokeTools({ sessionKey: "main:abc" }, cfg);
+    await awaitGateBeforeSettlement(started.promise, ordinary, "inventory did not start");
+    release.resolve();
+    const responses = await Promise.all([ordinary, sandboxed]);
+    mockSession({ sandboxMode: "off" }, { cfg });
+    responses.push(await invokeTools({ sessionKey: "main:abc" }, cfg));
+    expectResponsesOk(...responses);
+    expect(
+      responses.map((respond) =>
+        payloadOf(respond).groups.some((group) =>
+          group.tools.some((tool) => tool.id === "web_search"),
+        ),
+      ),
+    ).toEqual([true, false, true]);
+    expect(runtimeMocks.resolveEffectiveToolInventory).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["matched", "wrong agent", "wrong key", "worker turn", "inactive"])(
+    "projects remote-exec sandbox policy with local mode off (%s)",
+    async (scenario) => {
+      const placement =
+        scenario === "inactive"
+          ? localPlacement()
+          : activePlacement("session-1", {
+              executionMode: scenario === "worker turn" ? "worker-turn" : "remote-exec",
+              agentId: scenario === "wrong agent" ? "other" : "main",
+              sessionKey: scenario === "wrong key" ? "agent:main:other" : "main:abc",
+            });
+      const getManyAsync = vi.fn(async () => new Map([["session-1", placement]]));
+      const getMany = vi.fn(() => new Map());
+      const prepareRuntimeRefresh = vi.fn();
+      mockSession(
+        { sandboxMode: "off" },
+        { cfg: { agents: { defaults: { sandbox: { mode: "off" } } } } },
+      );
+      mockMcpTools([makeMcpTool()]);
+      runtimeMocks.applyFinalEffectiveToolPolicy.mockImplementation(applyFinalEffectiveToolPolicy);
+      const respond = await invokeTools(
+        undefined,
+        {},
+        {
+          workerSessionPlacementService: { getMany, getManyAsync, prepareRuntimeRefresh },
+        },
+      );
+      expectResponsesOk(respond);
+      expect(payloadOf(respond).groups.some((group) => group.source === "mcp")).toBe(
+        scenario !== "matched",
+      );
+      expect(getManyAsync).toHaveBeenCalledWith(["session-1"]);
+      expect(getMany).not.toHaveBeenCalled();
+      expect(prepareRuntimeRefresh).not.toHaveBeenCalled();
+    },
+  );
 
   it("applies inherited MCP denies from the session entry already read by the request", async () => {
     const sessionKey = "agent:main:subagent:prepared-policy";
@@ -862,7 +954,11 @@ describe("tools.effective handler", () => {
   it.each(["empty", "mixed"])(
     "reports unavailable MCP servers with a %s catalog without losing base notices",
     async (kind) => {
-      const baseNotice = { id: "base-notice", severity: "info", message: "Keep the base notice" };
+      const baseNotice: NonNullable<ToolsEffectivePayload["notices"]>[number] = {
+        id: "base-notice",
+        severity: "info",
+        message: "Keep the base notice",
+      };
       const base = { ...makeCoreInventory(), notices: [baseNotice] };
       const diagnostic = {
         serverName: "offline",
@@ -896,7 +992,7 @@ describe("tools.effective handler", () => {
   );
 
   it("keeps usable MCP tools and ordered quarantine notices without changing the cached base", async () => {
-    const base = {
+    const base: ToolsEffectivePayload = {
       ...makeCoreInventory(),
       notices: [{ id: "base-notice", severity: "info", message: "Keep the base notice" }],
     };

@@ -21,14 +21,10 @@ import { applyFinalEffectiveToolPolicy } from "../../agents/embedded-agent-runne
 import { getRegisteredAgentHarness } from "../../agents/harness/registry.js";
 import { agentHarnessExposesOpenClawTools } from "../../agents/harness/tool-surface.js";
 import { resolveEffectiveAgentRuntime } from "../../agents/thinking-runtime.js";
-import { listCoreToolSections } from "../../agents/tool-catalog.js";
 import { readToolAllowlistIntersection } from "../../agents/tool-policy-shared.js";
 import type { ToolPolicyLike } from "../../agents/tool-policy.js";
 import { buildEffectiveToolInventoryGroups } from "../../agents/tools-effective-inventory-groups.js";
-import {
-  buildEffectiveToolInventory,
-  CODEX_GITHUB_PREVIEW_UNAVAILABLE_NOTICE,
-} from "../../agents/tools-effective-inventory-shared.js";
+import { buildEffectiveToolInventory } from "../../agents/tools-effective-inventory-shared.js";
 import {
   resolveEffectiveToolInventory,
   acquireEffectiveToolInventoryRuntimeModelContext,
@@ -37,6 +33,7 @@ import type {
   EffectiveToolInventoryNotice,
   EffectiveToolInventoryResult,
 } from "../../agents/tools-effective-inventory.types.js";
+import { resolveSessionToolPreviewSandboxPolicy } from "../../agents/tools-effective-sandbox-policy.js";
 import { resolveReplyToMode } from "../../auto-reply/reply/reply-threading.js";
 import { resolveRuntimeConfigCacheKey } from "../../config/config.js";
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
@@ -61,7 +58,8 @@ import { resolveSessionModelRef, type GatewaySessionEntryRead } from "../session
 import { respondError } from "./response.js";
 import { readGatewayRequestMutationAuthority } from "./session-mutation-guards.js";
 import { retainSessionScopedRead } from "./session-scoped-read.js";
-import type { GatewayRequestHandlers, RespondFn } from "./types.js";
+import { projectSessionToolPreview } from "./tools-effective.projection.js";
+import type { GatewayRequestContext, GatewayRequestHandlers, RespondFn } from "./types.js";
 import { defineValidatedGatewayHandler } from "./validation.js";
 
 type TrustedToolsEffectiveContext = NonNullable<
@@ -74,55 +72,6 @@ const TOOLS_EFFECTIVE_SLOW_LOG_MS = 250;
 const TOOLS_EFFECTIVE_CACHE_LIMIT = 128;
 const MCP_CONFIG_SUMMARY_CACHE_LIMIT = 128;
 const BUNDLE_MCP_PLUGIN_ID = "bundle-mcp";
-
-// Static presentation only: the effective inventory still owns tool selection.
-const coreToolDescriptions = new Map(
-  listCoreToolSections({ swarmEnabled: true, personalInstructionsEnabled: true }).flatMap(
-    (section) => section.tools.map((tool) => [tool.id, tool.description] as const),
-  ),
-);
-
-function projectSessionToolPreview(
-  inventory: EffectiveToolInventoryResult,
-): EffectiveToolInventoryResult {
-  return {
-    agentId: inventory.agentId,
-    profile: inventory.profile,
-    // Rebuild this fixed core notice; never copy runtime diagnostic text or details.
-    ...(inventory.notices?.some(
-      (notice) => notice.id === CODEX_GITHUB_PREVIEW_UNAVAILABLE_NOTICE.id,
-    )
-      ? { notices: [CODEX_GITHUB_PREVIEW_UNAVAILABLE_NOTICE] }
-      : {}),
-    groups: inventory.groups.map((group) => ({
-      id: group.id,
-      label: group.label,
-      source: group.source,
-      tools: group.tools.map((tool) => {
-        // Runtime descriptions and notices can contain MCP launch details or host paths.
-        const description =
-          tool.source !== "core"
-            ? ""
-            : tool.id === "github_publish"
-              ? tool.rawDescription // Its owner renders only the policy-filtered action names.
-              : (coreToolDescriptions.get(tool.id) ?? "");
-        return {
-          id: tool.id,
-          label: tool.id,
-          source: tool.source,
-          description,
-          rawDescription: description,
-          ...(tool.pluginId ? { pluginId: tool.pluginId } : {}),
-          ...(tool.channelId ? { channelId: tool.channelId } : {}),
-          ...(tool.source === "mcp"
-            ? { mcpServer: tool.mcpServer, mcpToolName: tool.mcpToolName }
-            : {}),
-          ...(tool.deniedBySession ? { deniedBySession: true as const } : {}),
-        };
-      }),
-    })),
-  };
-}
 
 type ToolsEffectiveCacheEntry = {
   value: EffectiveToolInventoryResult;
@@ -523,6 +472,7 @@ async function resolveTrustedToolsEffectiveContext(
     requestedAgentId?: string;
     localEmbedded?: boolean;
     respond: RespondFn;
+    context: GatewayRequestContext;
   },
   loaded: Pick<GatewaySessionEntryRead, "entry" | "canonicalKey" | "cfg">,
 ) {
@@ -620,6 +570,13 @@ async function resolveTrustedToolsEffectiveContext(
       config: context.cfg,
       sessionKey: context.sessionKey,
       preparedSessionEntry: { sessionKey: canonicalKey, entry: loaded.entry },
+      sandboxToolPolicy: await resolveSessionToolPreviewSandboxPolicy({
+        cfg: context.cfg,
+        agentId: context.agentId,
+        sessionKey: canonicalKey,
+        sessionEntry: loaded.entry,
+        context: params.context,
+      }),
       agentId: context.agentId,
       modelProvider: context.modelProvider,
       modelId: context.modelId,
@@ -663,6 +620,7 @@ export const toolsEffectiveHandlers: GatewayRequestHandlers = {
             requestedAgentId: sessionOwner.agentId,
             localEmbedded: context.localEmbedded,
             respond,
+            context,
           },
           loaded,
         );
